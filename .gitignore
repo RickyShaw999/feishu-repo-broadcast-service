@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+compose.override.yaml
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -22,3 +23,5 @@ secrets/*.txt
 !secrets/README.md
 
 .omx/
+.codex
+.codex/

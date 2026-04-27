@@ -43,3 +43,9 @@ volumes:
   repo_broadcast_data:
   caddy_data:
   caddy_config:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 192.168.251.0/24

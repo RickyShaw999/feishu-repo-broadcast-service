@@ -1,644 +1,501 @@
 # 飞书仓库广播服务
 
-这个仓库提供一个小型服务：当 Codeup 或 GitLab 仓库发生 push 时，服务接收仓库发来的 Webhook，把提交信息整理成飞书消息，再发到一个飞书群机器人。
+`feishu-repo-broadcast-service` 用来接收 Codeup 或 GitLab 的 `push` Webhook，并把关键信息转发到飞书群机器人。
 
-先记住三个原则：
+它适合下面这种场景：
 
-- 一个服务实例只对应一个代码仓库。
-- 一个服务实例只对应一个飞书群机器人。
-- 先跑 `dry_run`，确认服务能收到事件、能生成消息、能去重，但不真的发飞书；确认无误后再切到 `live`。
+- 一个代码仓库对应一个飞书群
+- 只关心 `push` 事件
+- 需要先 `dry_run` 验证，再切到 `live`
+- 希望部署方式足够简单，团队成员拿到 README 就能复现
 
-## 先回答：本地启动时，Codeup 新建 Webhook 应该填什么
+## 功能概览
 
-如果你现在只是“在自己电脑本地启动了这个 codebase”，一般先不要去 Codeup 新建 Webhook。
-
-原因很简单：Codeup 是云端服务，它访问不到你电脑里的 `127.0.0.1:8088`。所以如果你在 Codeup Webhook URL 里填：
-
-```text
-http://127.0.0.1:8088/webhooks/codeup
-```
-
-Codeup 会访问它自己的 `127.0.0.1`，不是你的电脑，肯定打不到你的本地服务。
-
-本地阶段推荐这样做：
-
-1. 本地启动服务。
-2. 用仓库里的 fixture 脚本模拟一次 Codeup 请求。
-3. 看日志确认服务能收到事件、能生成消息、能去重。
-4. 等部署到公网服务器，或者你有公网隧道后，再去 Codeup 后台配置真实 Webhook。
-
-如果你已经有公网服务器，Codeup 新建 Webhook 填：
-
-| Codeup 表单项 | 应该填写 |
-| --- | --- |
-| URL / Webhook URL / 请求地址 | `https://<你的域名>/webhooks/codeup` |
-| 触发事件 | 只选 push 事件 |
-| Secret Token / Token / 密钥 | 和服务端配置的一样。生产环境通常是 `secrets/codeup_secret_token.txt` 里的内容 |
-| SSL 校验 | 如果使用正常 HTTPS 域名，保持开启 |
-
-如果你只是本地启动，但通过 ngrok、cloudflared tunnel、frp 等工具暴露了一个公网 HTTPS 地址，Codeup 新建 Webhook 可以填：
-
-| Codeup 表单项 | 应该填写 |
-| --- | --- |
-| URL / Webhook URL / 请求地址 | `https://<你的公网隧道域名>/webhooks/codeup` |
-| 触发事件 | 只选 push 事件 |
-| Secret Token / Token / 密钥 | `.env` 里的 `CODEUP_SECRET_TOKEN` |
-| SSL 校验 | 如果隧道是正常 HTTPS，保持开启 |
-
-查看本地 `.env` 里的 Codeup token：
-
-```bash
-grep '^CODEUP_SECRET_TOKEN=' .env | cut -d= -f2-
-```
-
-Codeup Webhook 的 secret token 必须和服务端的 token 一模一样。比如服务端 token 是 `abc123`，Codeup 后台也必须填 `abc123`。两边不一致，服务会返回 `401 invalid Codeup secret token`。
-
-## 这个服务最终怎么工作
-
-完整流程是：
-
-1. 有人向 Codeup 或 GitLab 仓库 push 代码。
-2. 仓库平台向本服务发送 Webhook 请求。
-3. 本服务检查请求是不是 push 事件。
-4. 本服务检查请求里的 secret token 是否正确。
-5. 校验通过后，本服务把 push 事件整理成飞书消息。
-6. 服务把处理状态写入 SQLite，避免同一个事件重复发送。
-7. `dry_run` 模式只记录消息，不发飞书。
-8. `live` 模式会真正调用飞书机器人 Webhook，把消息发到群里。
-
-Codeup 请求进入服务时，服务实际检查的是：
-
-- 请求路径：`/webhooks/codeup`
-- 事件头：`Codeup-Event: Push Hook`
-- token 头：`X-Codeup-Token: <你配置的 token>`
-
-这些请求头通常由 Codeup 平台自动发送。你在 Codeup 后台主要需要填 URL、push 事件、secret token。
-
-## 功能范围
-
-v1 支持：
-
-- Codeup push Webhook
-- GitLab push Webhook
-- 每个仓库与飞书机器人对应一个服务实例
+- 支持 Codeup `push` Webhook
+- 支持 GitLab `push` Webhook
+- SQLite 持久化去重、outbox、重试、重启恢复
 - Docker Compose 部署
-- 使用 Docker Compose secrets 管理生产环境配置值
-- SQLite outbox、去重、重试状态与重启恢复
-- 在任何真实飞书调用前使用 dry-run 模式
+- 生产环境使用 Docker Compose secrets 读取 token / 飞书 webhook
+- 飞书消息使用简洁文本格式，保留操作人、仓库、分支、时间、提交摘要等关键信息
 
-v1 不支持：
+当前不支持：
 
-- PR/MR/comment/review 事件
-- 在一个实例中支持多个仓库或多个飞书机器人
-- Codeup 和 GitLab 之外的提供方
-- UI/管理控制台
-- 复杂权限或审计系统
+- PR / MR / 评论 / Review 事件
+- 一个实例绑定多个仓库
+- 一个实例绑定多个飞书机器人
+- UI 管理后台
 
-## 路线 A：只在本地测试，不接 Codeup 后台
+## 服务行为
 
-这条路线适合你现在的状态：代码在本地，服务也在本地启动，还没有公网域名。
+### 输入
 
-### A1. 准备 `.env`
+- Codeup: `POST /webhooks/codeup`
+- GitLab: `POST /webhooks/gitlab`
 
-复制环境变量示例文件：
+### 输出
 
-```bash
-cp .env.example .env
-```
+`dry_run`：
 
-生成本地测试用 token，并把端口改成本机测试端口：
+- 接收并校验 Webhook
+- 生成飞书消息
+- 写入 SQLite
+- 不真正调用飞书
 
-```bash
-python - <<'PY'
-import secrets
-from pathlib import Path
+`live`：
 
-path = Path(".env")
-text = path.read_text()
-text = text.replace("CODEUP_SECRET_TOKEN=", f"CODEUP_SECRET_TOKEN={secrets.token_urlsafe(32)}")
-text = text.replace("GITLAB_SECRET_TOKEN=", f"GITLAB_SECRET_TOKEN={secrets.token_urlsafe(32)}")
-text = text.replace("PUBLIC_HOST=repo-broadcast.example.com", "PUBLIC_HOST=:80")
-text = text.replace("HTTP_PORT=80", "HTTP_PORT=8088")
-text = text.replace("HTTPS_PORT=443", "HTTPS_PORT=8443")
-path.write_text(text)
-PY
-```
+- 执行上述全部流程
+- 并真实调用飞书机器人 Webhook
 
-这一步会把 token 写进 `.env`，例如：
+### 健康检查
 
-```dotenv
-CODEUP_SECRET_TOKEN=<随机生成的一长串>
-GITLAB_SECRET_TOKEN=<随机生成的一长串>
-DELIVERY_MODE=dry_run
-```
+- `/health`：进程存活
+- `/ready`：SQLite 可打开
 
-本地测试时不需要创建 `secrets/codeup_secret_token.txt`。
+## 飞书消息长什么样
 
-### A2. 启动服务
-
-```bash
-docker compose up -d --build
-```
-
-查看容器是否起来：
-
-```bash
-docker compose ps
-```
-
-### A3. 检查服务健康状态
-
-检查进程是否活着：
-
-```bash
-curl -fsS http://127.0.0.1:8088/health
-```
-
-检查 SQLite 是否能打开：
-
-```bash
-curl -fsS http://127.0.0.1:8088/ready
-```
-
-这两个命令没有报错，就说明服务基础状态正常。
-
-### A4. 用 fixture 脚本模拟 Codeup 请求
-
-fixture 脚本的意思是：不用真的去 Codeup 后台配置 Webhook，而是在你电脑上伪造一条 Codeup push 请求，直接 POST 给本地服务。
-
-发送 Codeup 测试事件：
-
-```bash
-python scripts/dev_send_fixture.py codeup tests/fixtures/codeup_push.json --base-url http://127.0.0.1:8088 --token "$(grep '^CODEUP_SECRET_TOKEN=' .env | cut -d= -f2-)"
-```
-
-这个命令做了几件事：
-
-1. 读取 `tests/fixtures/codeup_push.json` 里的测试 push 事件。
-2. 从 `.env` 读取 `CODEUP_SECRET_TOKEN`。
-3. 向 `http://127.0.0.1:8088/webhooks/codeup` 发送 POST 请求。
-4. 带上 `Codeup-Event: Push Hook` 和 `X-Codeup-Token: <token>`。
-
-如果成功，你会看到类似：
+当前飞书消息为简洁文本，不再附带原始 JSON。示例：
 
 ```text
-200
-{"status":"accepted", ...}
+代码推送通知
+操作人：RickyShaw
+仓库：pengleni
+分支：develop
+推送时间：2026-04-27T20:41:56.000+08:00
+提交数量：1
+版本范围：5b3cbd5b -> f2514848
+提交内容：
+- f2514848 RickyShaw: 测试飞书机器人
+仓库链接：https://codeup.aliyun.com/.../pengleni
 ```
 
-### A5. 看日志
+## 快速开始
 
-```bash
-docker compose logs --no-color --tail=200
-```
+### 前置条件
 
-你要确认：
+- Linux 服务器
+- Docker
+- Docker Compose v2
+- 一个飞书群自定义机器人
+- 一个可从 Codeup / GitLab 访问到的域名或公网入口
 
-- 日志里有 `webhook.accepted provider=codeup`。
-- 因为现在是 `DELIVERY_MODE=dry_run`，服务不会真的调用飞书。
-- 服务会把渲染后的飞书消息载荷和投递状态写进 SQLite。
+推荐额外准备：
 
-### A6. 测试重复事件不会重复处理
+- 宿主机 nginx 反向代理
+- 安全组已放通 `80`；如需 HTTPS 再放通 `443`
 
-再执行一次同样的 Codeup fixture 命令：
+## 生产部署：推荐路径
 
-```bash
-python scripts/dev_send_fixture.py codeup tests/fixtures/codeup_push.json --base-url http://127.0.0.1:8088 --token "$(grep '^CODEUP_SECRET_TOKEN=' .env | cut -d= -f2-)"
-```
+下面是本仓库已经在线验证通过的一条路径，适合“宿主机已有 nginx，对外开放 80 端口”的场景。
 
-第二次应该看到：
+拓扑如下：
 
 ```text
-"status":"duplicate"
+Codeup / GitLab
+    -> http://feishu.example.com/webhooks/codeup
+    -> 宿主机 nginx :80
+    -> 127.0.0.1:8088
+    -> docker compose 中的 caddy
+    -> app:8080
 ```
 
-这表示服务识别出这是同一个事件，不会重复发送。
-
-### A7. 本地测试 GitLab，可选
-
-如果你也想测 GitLab：
+### 1. 克隆代码
 
 ```bash
-python scripts/dev_send_fixture.py gitlab tests/fixtures/gitlab_push.json --base-url http://127.0.0.1:8088 --token "$(grep '^GITLAB_SECRET_TOKEN=' .env | cut -d= -f2-)"
-```
-
-如果你只接 Codeup，这一步可以跳过。
-
-## 路线 B：本地服务，但让 Codeup 真正打进来
-
-这条路线只有在你有公网隧道时才适用，例如 ngrok、cloudflared tunnel、frp。核心要求是：Codeup 必须能从公网访问到你的本地服务。
-
-假设你的公网隧道地址是：
-
-```text
-https://abc.example-tunnel.com
-```
-
-那 Codeup 新建 Webhook 填：
-
-| Codeup 表单项 | 填什么 |
-| --- | --- |
-| URL / Webhook URL / 请求地址 | `https://abc.example-tunnel.com/webhooks/codeup` |
-| 触发事件 | 只选 push 事件 |
-| Secret Token / Token / 密钥 | 运行 `grep '^CODEUP_SECRET_TOKEN=' .env | cut -d= -f2-` 得到的值 |
-| SSL 校验 | 正常 HTTPS 隧道保持开启 |
-
-然后在 Codeup 后台点测试，或者向仓库 push 一次测试提交。
-
-回到本地看日志：
-
-```bash
-docker compose logs --no-color --tail=200
-```
-
-如果看到 `webhook.accepted provider=codeup`，说明 Codeup 已经能打到你的本地服务。
-
-注意：这时依然建议保持 `DELIVERY_MODE=dry_run`，先不要发真实飞书。
-
-## 路线 C：部署到生产服务器，先 dry-run 验证
-
-这条路线适合真正上线。假设你有一台服务器和一个域名，例如：
-
-```text
-repo-broadcast.example.com
-```
-
-生产建议先 dry-run。也就是说，先让 Codeup 真实打到生产服务器，但服务不发飞书，只记录消息和日志。确认没问题后再切 live。
-
-### C1. 把代码放到服务器
-
-在服务器上进入你放代码的位置，例如：
-
-```bash
-cd /opt
-git clone <this-repo-url> feishu-repo-broadcast-service
+git clone <repo-url> feishu-repo-broadcast-service
 cd feishu-repo-broadcast-service
 ```
 
-如果你不是用 git clone，而是用其他方式上传代码，也可以，只要最后进入仓库根目录即可。
-
-### C2. 创建 `.env`
+### 2. 准备 `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`，生产服务器建议这样：
+如果宿主机 `80/443` 已被现有 nginx 占用，建议使用下面这组端口：
 
 ```dotenv
-DELIVERY_MODE=dry_run
-PUBLIC_HOST=repo-broadcast.example.com
+PUBLIC_HOST=:80
+HTTP_PORT=8088
+HTTPS_PORT=8443
+```
+
+含义是：
+
+- 容器内 caddy 继续监听 `80/443`
+- 宿主机只把它映射到 `8088/8443`
+- 再由宿主机 nginx 把正式域名反代到 `127.0.0.1:8088`
+
+如果你的服务器没有现成 nginx，也可以直接使用 `80/443`：
+
+```dotenv
+PUBLIC_HOST=feishu.example.com
 HTTP_PORT=80
 HTTPS_PORT=443
 ```
 
-`PUBLIC_HOST` 必须换成你的真实域名。域名 DNS 要指向这台服务器。
+### 3. 创建 secrets
 
-### C3. 创建生产密钥文件
-
-创建密钥目录：
+先创建目录：
 
 ```bash
 mkdir -p secrets
 ```
 
-创建 Codeup token。这个 token 是你自己定的一段随机字符串，后面 Codeup 后台也要填同一个值：
+生成 Codeup token：
 
 ```bash
-python - <<'PY' > secrets/codeup_secret_token.txt
+python3 - <<'PY' > secrets/codeup_secret_token.txt
 import secrets
 print(secrets.token_urlsafe(32), end="")
 PY
 ```
 
-如果不用 GitLab，也可以先生成一个占位 token：
+生成 GitLab token：
 
 ```bash
-python - <<'PY' > secrets/gitlab_secret_token.txt
+python3 - <<'PY' > secrets/gitlab_secret_token.txt
 import secrets
 print(secrets.token_urlsafe(32), end="")
 PY
 ```
 
-生产 dry-run 阶段可以先不创建飞书 Webhook URL。如果你已经有飞书机器人 URL，也可以先创建，但 `dry_run` 不会调用它：
+写入飞书机器人 webhook：
 
 ```bash
 printf '%s' '<feishu-webhook-url>' > secrets/feishu_webhook_url.txt
 ```
 
-如果飞书机器人启用了签名：
+如果飞书机器人启用了签名，再额外创建：
 
 ```bash
 printf '%s' '<feishu-signing-secret>' > secrets/feishu_signing_secret.txt
 ```
 
-### C4. 复制并调整 `compose.override.yaml`
-
-复制：
+### 4. 准备 `compose.override.yaml`
 
 ```bash
 cp compose.override.example.yaml compose.override.yaml
 ```
 
-打开 `compose.override.yaml`，先把：
+推荐流程：
+
+1. 第一轮验证先把 `DELIVERY_MODE: live` 改成 `dry_run`
+2. 验证通过后再切回 `live`
+
+如果没有启用飞书签名，保持这三处注释：
 
 ```yaml
-DELIVERY_MODE: live
+# FEISHU_SIGNING_SECRET_FILE: /run/secrets/feishu_signing_secret
+# - feishu_signing_secret
+# feishu_signing_secret:
+#   file: ./secrets/feishu_signing_secret.txt
 ```
 
-改成：
+### 5. 启动服务
 
-```yaml
-DELIVERY_MODE: dry_run
-```
-
-这样可以使用 Docker Compose secrets 读取 token，但暂时不发飞书。
-
-如果还没有创建 `secrets/feishu_webhook_url.txt`，也要先注释掉这两处：
-
-```yaml
-FEISHU_WEBHOOK_URL_FILE: /run/secrets/feishu_webhook_url
-```
-
-以及：
-
-```yaml
-- feishu_webhook_url
-```
-
-如果已经创建了 `secrets/feishu_webhook_url.txt`，可以不注释。
-
-如果启用了飞书签名，再取消签名相关三处注释：
-
-```yaml
-FEISHU_SIGNING_SECRET_FILE: /run/secrets/feishu_signing_secret
-```
-
-```yaml
-- feishu_signing_secret
-```
-
-```yaml
-feishu_signing_secret:
-  file: ./secrets/feishu_signing_secret.txt
-```
-
-### C5. 启动生产 dry-run 服务
+如果你的 shell 里配置了本地代理，例如：
 
 ```bash
+HTTP_PROXY=http://localhost:7777
+HTTPS_PROXY=http://localhost:7777
+```
+
+请先清掉再构建，否则 Docker build 容器里访问 `localhost:7777` 会指向容器自己，可能导致 pip 下载到空响应。
+
+```bash
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 docker compose up -d --build
 ```
 
-检查：
+### 6. 宿主机 nginx 反代
+
+如果宿主机已经有 nginx，直接使用仓库提供的模板：
+
+- [deploy/nginx.feishu.zhibianai.com.conf.example](deploy/nginx.feishu.zhibianai.com.conf.example)
+
+最常见做法：
 
 ```bash
-docker compose ps
-curl -fsS https://repo-broadcast.example.com/health
-curl -fsS https://repo-broadcast.example.com/ready
+sudo cp deploy/nginx.feishu.zhibianai.com.conf.example /etc/nginx/conf.d/feishu.example.com.conf
+sudo nginx -t
+sudo systemctl reload nginx
 ```
 
-把 `repo-broadcast.example.com` 换成你的真实域名。
+模板核心逻辑是：
 
-### C6. 在 Codeup 新建 Webhook
+```nginx
+server {
+    listen 80;
+    server_name feishu.example.com;
 
-先查看你要填到 Codeup 的 token：
+    location / {
+        proxy_pass http://127.0.0.1:8088;
+    }
+}
+```
+
+### 7. 配置 DNS / 安全组
+
+必须确认：
+
+- 域名已解析到当前服务器的公网入口 IP
+- 安全组已放通公网入方向 `TCP 80`
+- 如果将来要启用 HTTPS，再放通 `TCP 443`
+
+如果你能 `ssh <公网IP> -p <端口>` 登录服务器，不代表 `80/443` 也已经放通。需要单独检查公网入方向规则。
+
+### 8. 验证健康状态
 
 ```bash
-cat secrets/codeup_secret_token.txt
+curl -fsS http://127.0.0.1:8088/health
+curl -fsS http://127.0.0.1:8088/ready
+curl -fsS http://<你的域名>/health
 ```
 
-然后去 Codeup 仓库后台新建 Webhook：
+正确结果：
 
-| Codeup 表单项 | 填什么 |
+```json
+{"status":"ok"}
+```
+
+和：
+
+```json
+{"status":"ready"}
+```
+
+## Codeup 配置
+
+### 新建 Webhook 时怎么填
+
+| Codeup 表单项 | 填写方式 |
 | --- | --- |
-| URL / Webhook URL / 请求地址 | `https://repo-broadcast.example.com/webhooks/codeup` |
-| 触发事件 | 只选 push 事件 |
-| Secret Token / Token / 密钥 | `cat secrets/codeup_secret_token.txt` 输出的内容 |
-| SSL 校验 | 保持开启 |
+| URL | `http://<你的域名>/webhooks/codeup` 或 `https://<你的域名>/webhooks/codeup` |
+| Secret Token | `secrets/codeup_secret_token.txt` 中的内容 |
+| 触发器 | 只勾选 `推送事件` |
+| 描述 | 可填 `feishu repo broadcast service` |
 
-不要选择 PR、MR、评论、review 等事件。
+不要勾选：
 
-### C7. 推一次测试提交
+- 标签推送事件
+- 评论
+- 合并请求事件
 
-向 Codeup 仓库 push 一个很小的测试提交，然后看服务日志：
+### Codeup 实际兼容情况
 
-```bash
-docker compose logs --no-color --tail=200
+本仓库已经兼容下面两类 Codeup 请求：
+
+1. 真实 `push` 事件
+   Codeup 真实请求头可能使用：
+
+   - `X-Codeup-Event: Push Hook`
+   - `X-Codeup-Token: ...`
+
+2. Codeup 后台“测试 Webhook”按钮
+   这个按钮发出的 payload 可能只有：
+
+```json
+{"before":"...","after":"..."}
 ```
 
-你要确认：
+当前服务会把这类请求识别为 `probe` 并返回 `200`，不会误报 URL 错误。
 
-- 日志里有 `webhook.accepted provider=codeup`。
-- 没有 `invalid Codeup secret token`。
-- 没有 `unsupported Codeup event`。
-- 服务没有真的发飞书，因为现在还是 `dry_run`。
+## GitLab 配置
 
-如果你推送同一个事件或平台重试，同一个事件应该显示 `duplicate`，不会重复投递。
+| GitLab 表单项 | 填写方式 |
+| --- | --- |
+| URL | `http://<你的域名>/webhooks/gitlab` 或 `https://<你的域名>/webhooks/gitlab` |
+| Secret Token | `secrets/gitlab_secret_token.txt` 中的内容 |
+| Trigger | 只勾选 `Push events` |
 
-## 路线 D：生产服务器切换到 live，真正发送飞书
+## 飞书机器人怎么创建
 
-只有路线 C 全部验证通过后，才做这一步。
+`secrets/feishu_webhook_url.txt` 里的内容来自飞书群自定义机器人。
 
-### D1. 创建飞书密钥文件
+创建流程：
 
-如果还没创建飞书 Webhook URL：
+1. 打开目标飞书群
+2. 进入群设置
+3. 添加机器人
+4. 选择自定义机器人
+5. 创建后复制 Webhook URL
+6. 写入 `secrets/feishu_webhook_url.txt`
 
-```bash
-printf '%s' '<feishu-webhook-url>' > secrets/feishu_webhook_url.txt
-```
-
-如果飞书机器人启用了签名：
+如果飞书后台启用了签名校验，再把签名 secret 写入：
 
 ```bash
 printf '%s' '<feishu-signing-secret>' > secrets/feishu_signing_secret.txt
 ```
 
-### D2. 修改 `compose.override.yaml`
+## 建议的上线顺序
 
-把：
+### 阶段 1：dry-run
 
-```yaml
-DELIVERY_MODE: dry_run
-```
+1. `compose.override.yaml` 设置 `DELIVERY_MODE: dry_run`
+2. 启动服务
+3. 验证 `/health`、`/ready`
+4. 本地用 fixture 或 curl 模拟一次 Codeup 请求
+5. 确认第二次回放返回 `duplicate`
+6. 在 Codeup / GitLab 后台配置真实 webhook
+7. 推一次真实提交，确认服务可以接收
 
-改成：
+### 阶段 2：live
 
-```yaml
-DELIVERY_MODE: live
-```
+1. 把 `compose.override.yaml` 改回 `DELIVERY_MODE: live`
+2. `docker compose up -d --build`
+3. 再 push 一次小提交
+4. 确认飞书群收到了消息
 
-确认飞书 Webhook URL secret 已启用：
+## 本地验证命令
 
-```yaml
-FEISHU_WEBHOOK_URL_FILE: /run/secrets/feishu_webhook_url
-```
-
-以及：
-
-```yaml
-- feishu_webhook_url
-```
-
-如果启用了飞书签名，也确认签名 secret 已启用。
-
-### D3. 重启服务
+### 启动
 
 ```bash
 docker compose up -d --build
 ```
 
-### D4. 发送一次真实 push 测试
+### 健康检查
 
-向 Codeup 仓库 push 一次小提交。
+```bash
+curl -fsS http://127.0.0.1:8088/health
+curl -fsS http://127.0.0.1:8088/ready
+```
 
-确认：
+### 模拟 Codeup 请求
 
-1. 飞书群收到一条消息。
-2. 服务日志显示 `delivery.delivered`。
-3. 没有重复消息。
+如果宿主机 `python` 版本较旧，也可以直接用 `curl`，不依赖 `scripts/dev_send_fixture.py`：
 
-查看日志：
+```bash
+curl -sS -X POST http://127.0.0.1:8088/webhooks/codeup \
+  -H 'Content-Type: application/json' \
+  -H 'X-Codeup-Event: Push Hook' \
+  -H "X-Codeup-Token: $(cat secrets/codeup_secret_token.txt)" \
+  --data @tests/fixtures/codeup_push.json
+```
+
+### 查看日志
 
 ```bash
 docker compose logs --no-color --tail=200
 ```
 
-建议保存两份上线证据：
-
-- 服务日志。
-- 人工确认飞书群收到消息的记录。
-
 ## 常见问题
 
-### 我本地没有 `secrets/codeup_secret_token.txt`，正常吗？
+### 1. `docker compose up -d --build` 提示 Docker socket permission denied
 
-正常。
+把当前用户加入 `docker` 组，或直接用 `sudo docker ...`。
 
-本地 dry-run 默认使用 `.env` 里的 `CODEUP_SECRET_TOKEN`。`secrets/codeup_secret_token.txt` 是生产部署使用 Docker Compose secrets 时才需要自己创建的文件。它不会被提交到 Git。
+### 2. Docker 网络创建失败
 
-### fixture 脚本是什么？
+如果看到：
 
-fixture 脚本就是“本地假装 Codeup 发来了一次 push Webhook”。
+```text
+could not find an available, non-overlapping IPv4 address pool
+```
 
-它不会访问 Codeup，也不需要 Codeup 后台配置。它只是读取仓库里的测试 JSON，然后直接请求你的本地服务。
+当前仓库已经在 [compose.yaml](compose.yaml) 里固定了默认子网：
 
-### `/health`、`/ready`、fixture POST、重复回放是什么意思？
+```yaml
+192.168.251.0/24
+```
 
-- `/health`：确认服务进程活着。
-- `/ready`：确认服务能打开 SQLite。
-- fixture POST：用测试数据模拟一次 Codeup 或 GitLab push Webhook。
-- 重复回放：把同一个 fixture 再发一次，确认服务返回 `duplicate`，不会重复投递。
+正常情况下不需要再手工处理。
 
-### 为什么要先 dry-run？
+### 3. 宿主机 `80` 端口被占用
 
-因为 dry-run 可以确认 Webhook、token、消息格式、去重、日志都正常，但不会真的往飞书群发消息。这样不会误打扰群成员。
+如果宿主机已有 nginx / caddy / 面板服务，不要强行让 compose 去抢 `80/443`。
 
-### 什么时候才去 Codeup 后台新建 Webhook？
+请改用：
 
-满足下面任一条件再去：
+```dotenv
+PUBLIC_HOST=:80
+HTTP_PORT=8088
+HTTPS_PORT=8443
+```
 
-- 服务已经部署到公网服务器，并且有真实域名。
-- 本地服务已经通过公网隧道暴露给 Codeup。
+然后由宿主机 nginx 反代到 `127.0.0.1:8088`。
 
-如果只是普通本地启动，不要在 Codeup 后台填 `127.0.0.1`。
+### 4. Codeup 测试按钮报 URL 错误
 
-## Webhook 配置速查
+可能原因：
 
-Codeup：
+- 公网 `80` 未放通
+- 域名没有解析到正确入口
+- nginx 未加载反代配置
+- 运行中的容器还是旧版本
 
-- URL：`https://<host>/webhooks/codeup`
-- 触发器：push 事件
-- 密钥 token：存储在 `.env` 的 `CODEUP_SECRET_TOKEN`，或生产服务器上的 `secrets/codeup_secret_token.txt`
+当前代码已经兼容 Codeup 的测试探测 payload。
 
-GitLab：
+### 5. 真实 push 返回 `unsupported Codeup event`
 
-- URL：`https://<host>/webhooks/gitlab`
-- 触发器：push 事件
-- 密钥 token：存储在 `.env` 的 `GITLAB_SECRET_TOKEN`，或生产服务器上的 `secrets/gitlab_secret_token.txt`
+Codeup 真实 push 常用的头是：
 
-## 飞书消息长什么样
+```text
+X-Codeup-Event: Push Hook
+```
 
-每条出站飞书消息包含两个部分：
+当前代码已经兼容 `X-Codeup-Event` 和 `Codeup-Event` 两种写法。
 
-1. `Technical Explanation Protocol`：操作人、动作、仓库、分支、版本范围、提交数量，以及简洁的提交详情。
-2. `Original Event`：提供方、ref、before/after SHA，以及有界的原始载荷块。
+### 6. Docker build 时 pip 报 `Broken pipe` / sha256 不匹配 / 空文件 hash
 
-第一部分给人快速阅读，第二部分给排查问题时使用。
+优先检查宿主机是否设置了本地代理：
+
+```bash
+HTTP_PROXY=http://localhost:7777
+HTTPS_PROXY=http://localhost:7777
+```
+
+这会让容器在 build 时访问到错误的 `localhost`。当前 [Dockerfile](Dockerfile) 已经显式清理构建代理，并切到清华 PyPI 镜像。
+
+重新构建建议：
+
+```bash
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+docker compose build --no-cache
+docker compose up -d
+```
+
+### 7. 本地 `python3` 过旧，fixture 脚本跑不起来
+
+如果宿主机 Python 小于 3.11，直接使用上面的 `curl` 方式模拟 webhook 即可。
 
 ## 配置项速查
 
 | 名称 | 默认值 | 用途 |
 | --- | --- | --- |
-| `DELIVERY_MODE` | `dry_run` | 投递模式。默认只记录载荷与状态；仅在真实飞书投递时使用 `live`。 |
-| `DATABASE_PATH` | Compose 中为 `/data/service.db` | SQLite 状态路径。 |
-| `CODEUP_SECRET_TOKEN` / `_FILE` | 必填 | Codeup 请求校验 token。 |
-| `GITLAB_SECRET_TOKEN` / `_FILE` | 必填 | GitLab 请求校验 token。 |
-| `FEISHU_WEBHOOK_URL` / `_FILE` | 空 | `live` 投递必填。 |
-| `FEISHU_SIGNING_SECRET` / `_FILE` | 空 | 可选的飞书自定义机器人签名密钥。 |
-| `MAX_DELIVERY_ATTEMPTS` | `5` | 重试耗尽阈值。 |
-| `LEASE_TIMEOUT_SECONDS` | `300` | 被中断的 `in_progress` 行的回收超时时间。 |
-| `PUBLIC_HOST` | 必填 | Caddy 站点地址。自动 HTTPS 使用真实域名；`:80` 仅用于本地 dry-run。 |
-| `HTTP_PORT` | `80` | 对外发布的 HTTP 端口。 |
-| `HTTPS_PORT` | `443` | 用于生产环境 Caddy 自动 TLS 的对外发布 HTTPS 端口。 |
+| `DELIVERY_MODE` | `dry_run` | `dry_run` 只记录不发飞书，`live` 真实投递 |
+| `DATABASE_PATH` | `/data/service.db` | SQLite 路径 |
+| `WORKER_ENABLED` | `true` | 是否启用 outbox worker |
+| `WORKER_INTERVAL_SECONDS` | `2` | worker 轮询间隔 |
+| `LEASE_TIMEOUT_SECONDS` | `300` | 卡住的 in-progress 回收阈值 |
+| `MAX_DELIVERY_ATTEMPTS` | `5` | 最大重试次数 |
+| `CODEUP_SECRET_TOKEN` / `_FILE` | 空 | Codeup token |
+| `GITLAB_SECRET_TOKEN` / `_FILE` | 空 | GitLab token |
+| `FEISHU_WEBHOOK_URL` / `_FILE` | 空 | 飞书机器人 webhook |
+| `FEISHU_SIGNING_SECRET` / `_FILE` | 空 | 飞书机器人签名 secret |
+| `PUBLIC_HOST` | `example.com` | caddy 站点地址；本地可用 `:80` |
+| `HTTP_PORT` | `80` | 宿主机 HTTP 端口 |
+| `HTTPS_PORT` | `443` | 宿主机 HTTPS 端口 |
 
-## 常用命令
+## 仓库内关键文件
 
-启动或更新服务：
+- [compose.yaml](compose.yaml)：基础服务编排
+- [compose.override.example.yaml](compose.override.example.yaml)：生产 secrets / live 示例
+- [deploy/nginx.feishu.zhibianai.com.conf.example](deploy/nginx.feishu.zhibianai.com.conf.example)：宿主机 nginx 反代模板
+- [Dockerfile](Dockerfile)：镜像构建
+- [docs/operations.md](docs/operations.md)：运行时说明
+- [secrets/README.md](secrets/README.md)：secrets 文件说明
 
-```bash
-docker compose up -d --build
-```
+## 给其他团队成员的最短交接话术
 
-查看日志：
-
-```bash
-docker compose logs --no-color --tail=200
-```
-
-停止服务：
-
-```bash
-docker compose down
-```
-
-检查容器状态：
-
-```bash
-docker compose ps
-```
-
-本地开发和测试：
-
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -e '.[test]'
-python -m compileall src tests
-pytest -q
-```
-
-## 如果你要让 agent 帮另一个仓库安装
-
-可以把下面这段提示词给 agent：
-
-```text
-为此仓库配置 feishu-repo-broadcast-service。
-要求：
-- 将该服务作为独立的同级仓库或外部依赖保留，不要放入产品代码
-- 根据当前 remote 选择 Codeup 或 GitLab 提供方
-- 只为 push 事件配置一个 webhook 端点
-- 使用 Docker Compose secrets 存放提供方 token 和飞书 webhook 值
-- 从 DELIVERY_MODE=dry_run 开始
-- 进入 live 模式前，验证 /health、/ready、一次 fixture POST、重复回放和日志
-- 在我提供 webhook 密钥值并明确批准 live 测试前，不要发送真实飞书消息
-```
-
-## `pengleni` 试点
-
-对于当前 `pengleni` 试点，请将此仓库独立保留在：
-
-```text
-/Users/rickyshaw/Documents/Codebase/feishu-repo-broadcast-service
-```
-
-将 Codeup 仓库 Webhook 指向已部署的 `/webhooks/codeup` URL，仅使用 push 事件，并保持 `pengleni` 业务代码不变。
+1. 克隆仓库
+2. 创建 `.env`
+3. 创建 `secrets/codeup_secret_token.txt`、`secrets/gitlab_secret_token.txt`、`secrets/feishu_webhook_url.txt`
+4. 复制 `compose.override.example.yaml -> compose.override.yaml`
+5. 宿主机已有 nginx 时，使用 `deploy/nginx.feishu.zhibianai.com.conf.example`
+6. 放通公网 `80`
+7. `unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy`
+8. `docker compose up -d --build`
+9. 验证 `/health`
+10. Codeup 只勾选 `推送事件`
+11. 先 `dry_run`，再 `live`

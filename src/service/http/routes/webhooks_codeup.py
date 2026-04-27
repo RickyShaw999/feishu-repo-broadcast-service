@@ -21,15 +21,27 @@ def _validate_token(actual: str | None, expected: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid Codeup secret token")
 
 
+def _event_header(request: Request) -> str | None:
+    return request.headers.get("X-Codeup-Event") or request.headers.get("Codeup-Event")
+
+
 @router.post("")
 async def receive_codeup_push(request: Request) -> dict[str, object]:
     settings = request.app.state.settings
-    if request.headers.get("Codeup-Event") != codeup.PUSH_HEADER:
-        LOGGER.warning("webhook.rejected provider=codeup reason=unsupported_event event=%s", request.headers.get("Codeup-Event"))
+    event_header = _event_header(request)
+    if event_header != codeup.PUSH_HEADER:
+        LOGGER.warning("webhook.rejected provider=codeup reason=unsupported_event event=%s", event_header)
         raise HTTPException(status_code=400, detail="unsupported Codeup event")
     _validate_token(request.headers.get("X-Codeup-Token"), settings.codeup_secret_token)
 
     payload = await request.json()
+    if codeup.is_test_hook_payload(payload):
+        LOGGER.info("webhook.accepted provider=codeup test_probe=true")
+        return {
+            "status": "probe_ok",
+            "detail": "Codeup test hook payload acknowledged",
+        }
+
     try:
         event = codeup.normalize_push(payload)
     except ValueError as exc:

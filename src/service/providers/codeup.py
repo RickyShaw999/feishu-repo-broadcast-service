@@ -13,6 +13,18 @@ def _branch_from_ref(ref: str) -> str:
     return ref.removeprefix("refs/heads/")
 
 
+def is_test_hook_payload(payload: dict[str, Any]) -> bool:
+    # Codeup's "Test Hook" button sends a minimal probe body with only before/after.
+    return (
+        payload.get("object_kind") is None
+        and "before" in payload
+        and "after" in payload
+        and payload.get("ref") is None
+        and payload.get("repository") is None
+        and payload.get("commits") is None
+    )
+
+
 def normalize_push(payload: dict[str, Any]) -> PushEvent:
     if payload.get("object_kind") != "push":
         raise ValueError("Codeup payload is not a push event")
@@ -52,4 +64,3 @@ def normalize_push(payload: dict[str, Any]) -> PushEvent:
         commits=commits,
         raw=payload,
     )
-

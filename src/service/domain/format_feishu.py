@@ -1,59 +1,49 @@
 from __future__ import annotations
 
-import json
-
 from service.domain.models import PushEvent
 
 
 MAX_COMMITS_IN_MESSAGE = 10
-MAX_RAW_CHARS = 3000
 
 
 def _short_sha(value: str) -> str:
     return value[:8] if value else "unknown"
 
 
+def _event_time(event: PushEvent) -> str:
+    timestamps = [commit.timestamp for commit in event.commits if commit.timestamp]
+    if timestamps:
+        return max(timestamps)
+    return "unknown"
+
+
 def render_message_text(event: PushEvent) -> str:
-    commit_count = event.total_commits_count
-    commit_word = "commit" if commit_count == 1 else "commits"
     repo_label = event.repository.path_with_namespace or event.repository.name
+    branch_label = event.branch or event.ref or "unknown"
+    commit_count = event.total_commits_count
     lines = [
-        "Technical Explanation Protocol",
-        f"- Actor: {event.actor_name}",
-        f"- Time: provider payload commit timestamps; newest commit shown below when present",
-        f"- Action: {event.action} on {event.provider}",
-        f"- Repository: {repo_label}",
-        f"- Branch: {event.branch or event.ref}",
-        f"- Revision: {_short_sha(event.before)} -> {_short_sha(event.after)}",
-        f"- Change size: {commit_count} {commit_word}",
+        "代码推送通知",
+        f"操作人：{event.actor_name}",
+        f"仓库：{repo_label}",
+        f"分支：{branch_label}",
+        f"推送时间：{_event_time(event)}",
+        f"提交数量：{commit_count}",
+        f"版本范围：{_short_sha(event.before)} -> {_short_sha(event.after)}",
     ]
 
     if event.commits:
-        lines.append("- Commit details:")
+        lines.append("提交内容：")
         for commit in event.commits[:MAX_COMMITS_IN_MESSAGE]:
             author = commit.author_name or "unknown"
             message = " ".join(commit.message.split()) or "(no message)"
-            lines.append(f"  - {_short_sha(commit.id)} {author}: {message}")
+            lines.append(f"- {_short_sha(commit.id)} {author}: {message}")
         remaining = len(event.commits) - MAX_COMMITS_IN_MESSAGE
         if remaining > 0:
-            lines.append(f"  - ... {remaining} more commit(s) omitted")
+            lines.append(f"- 其余 {remaining} 个提交已省略")
 
-    raw = json.dumps(event.raw, ensure_ascii=False, sort_keys=True, indent=2)
-    if len(raw) > MAX_RAW_CHARS:
-        raw = raw[:MAX_RAW_CHARS] + "\n...<truncated>"
+    if event.repository.web_url:
+        lines.append(f"仓库链接：{event.repository.web_url}")
 
-    lines.extend(
-        [
-            "",
-            "Original Event",
-            f"- Provider: {event.provider}",
-            f"- Ref: {event.ref}",
-            f"- Before: {event.before}",
-            f"- After: {event.after}",
-            "- Raw payload:",
-            raw,
-        ]
-    )
     return "\n".join(lines)
 
 
@@ -64,4 +54,3 @@ def build_feishu_payload(event: PushEvent) -> dict[str, object]:
             "text": render_message_text(event),
         },
     }
-

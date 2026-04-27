@@ -46,6 +46,36 @@ def test_codeup_webhook_accepts_valid_push_and_deduplicates(tmp_path) -> None:
     assert second.json()["status"] == "duplicate"
 
 
+def test_codeup_webhook_accepts_x_prefixed_event_header(tmp_path) -> None:
+    client = make_client(tmp_path)
+
+    response = client.post(
+        "/webhooks/codeup",
+        headers={"X-Codeup-Event": "Push Hook", "X-Codeup-Token": "codeup-secret"},
+        json=load_fixture("codeup_push.json"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+
+
+def test_codeup_webhook_acknowledges_test_hook_probe(tmp_path, caplog) -> None:
+    client = make_client(tmp_path)
+
+    response = client.post(
+        "/webhooks/codeup",
+        headers={"Codeup-Event": "Push Hook", "X-Codeup-Token": "codeup-secret"},
+        json={
+            "before": "f2e2d577fab1562a6239b82721fd9827e05fdce6",
+            "after": "eb63d0277e64684236ebf8394b919230c4b8a286",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "probe_ok"
+    assert "webhook.accepted provider=codeup test_probe=true" in caplog.text
+
+
 def test_gitlab_webhook_rejects_wrong_event(tmp_path, caplog) -> None:
     client = make_client(tmp_path)
 
