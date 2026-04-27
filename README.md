@@ -9,6 +9,116 @@
 - 需要先 `dry_run` 验证，再切到 `live`
 - 希望部署方式足够简单，团队成员拿到 README 就能复现
 
+## 给 Agent 的入口
+
+如果你的团队成员已经把仓库 clone 到服务器上，最推荐的用法不是“自己对着 README 手动点”，而是直接把这个 README 交给 agent，让 agent 按下面的约定自动完成部署。
+
+### Agent 目标
+
+agent 应该把当前仓库部署成一个可工作的服务，并完成以下事项：
+
+1. 生成 `.env`
+2. 生成 `secrets/*.txt`
+3. 准备 `compose.override.yaml`
+4. 构建并启动容器
+5. 验证 `/health` 和 `/ready`
+6. 如果宿主机已有 nginx，则配置反代
+7. 指导用户配置 Codeup / GitLab Webhook
+8. 先完成 `dry_run`
+9. 在用户提供飞书 webhook 并确认后切到 `live`
+10. 用真实 push 完成最终验收
+
+### Agent 默认假设
+
+除非用户明确说明不是，否则 agent 应该默认：
+
+- 当前服务部署在 Linux 服务器
+- 当前仓库已经 clone 到服务器本地
+- 优先走 Docker Compose 部署
+- 如果宿主机已有 nginx，不抢占宿主机 `80/443`
+- 优先使用 `PUBLIC_HOST=:80`、`HTTP_PORT=8088`、`HTTPS_PORT=8443`
+- 再通过宿主机 nginx 把正式域名反代到 `127.0.0.1:8088`
+- 先从 `DELIVERY_MODE=dry_run` 开始
+- Codeup 只配置 `推送事件`
+- GitLab 只配置 `Push events`
+
+### Agent 只需要向用户索取的最少信息
+
+如果缺少这些信息，agent 可以向用户询问；除此之外应尽量自动完成：
+
+- 域名是什么
+- 当前接的是 Codeup 还是 GitLab
+- 飞书机器人 webhook URL 是什么
+- 飞书机器人是否开启签名
+- 是否允许修改宿主机 nginx
+- 如果需要 `sudo`，用户是否愿意亲自执行那几条命令
+
+### Agent 自动执行边界
+
+agent 应自动完成：
+
+- 检查仓库结构
+- 检查 Docker / Compose 是否可用
+- 生成和修改仓库内文件
+- 构建容器
+- 发起本地健康检查
+- 使用 fixture 或 `curl` 模拟 webhook
+- 生成 nginx 配置模板
+- 给出需要用户去外部系统操作的精确字段
+
+agent 不应假设自己能自动完成：
+
+- 飞书后台创建机器人
+- Codeup / GitLab 后台点保存 webhook
+- 云控制台放通安全组
+- 输入用户的 `sudo` 密码
+
+### Agent 停止条件
+
+agent 应在下面任一条件满足前持续推进，不要停在“分析完成”：
+
+1. `dry_run` 已验证通过
+2. `live` 已验证通过
+3. 用户明确要求暂停
+4. 被外部系统权限阻塞，并且必须由用户亲自操作
+
+### Agent 完成标准
+
+agent 只有在下面这些都满足时，才应宣称部署完成：
+
+- 容器已启动
+- `/health` 返回 `ok`
+- `/ready` 返回 `ready`
+- webhook 校验 token 正常
+- webhook 可接受真实 push
+- 同一事件重复发送返回 `duplicate`
+- `live` 模式下飞书群收到真实消息
+
+### 直接贴给 Agent 的提示词
+
+下面这段可以直接复制给任意 coding agent：
+
+```text
+你现在在一台服务器上，仓库 feishu-repo-broadcast-service 已经 clone 完成。
+
+请直接阅读 README，并按 README 中的推荐路径自动完成部署。要求：
+
+- 优先走 Docker Compose
+- 如果宿主机已有 nginx，不要抢占 80/443，改走 8088/8443 + 宿主机 nginx 反代
+- 先从 dry_run 开始，验证 /health、/ready、一次 webhook 模拟、一次 duplicate 回放
+- 外部系统中必须由我手动完成的动作，你明确告诉我填写什么，不要泛泛而谈
+- 如果需要我操作，只在真正需要我提供内容、点外部系统按钮、输入 sudo 密码时再停下来
+- 完成 dry_run 后，再引导我切到 live
+- live 阶段要验证飞书群是否真的收到了消息
+- 如果 Codeup 测试按钮失败，要继续排查真实请求头、测试 payload、反代、DNS、安全组，不要停在猜测
+
+完成后给我一份结果摘要，包括：
+- 当前访问地址
+- Webhook 应该填写的 URL 和 token
+- 是否已经 live
+- 剩余需要我亲自完成的动作
+```
+
 ## 功能概览
 
 - 支持 Codeup `push` Webhook
