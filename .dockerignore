@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+data
+*.db
+*.sqlite
+*.sqlite3
+secrets/*.txt
+compose.override.yaml
+docs
+tests
+

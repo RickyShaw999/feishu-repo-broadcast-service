@@ -1,0 +1,24 @@
+services:
+  app:
+    environment:
+      DELIVERY_MODE: live
+      CODEUP_SECRET_TOKEN_FILE: /run/secrets/codeup_secret_token
+      GITLAB_SECRET_TOKEN_FILE: /run/secrets/gitlab_secret_token
+      FEISHU_WEBHOOK_URL_FILE: /run/secrets/feishu_webhook_url
+      # Uncomment when Feishu bot signing is enabled.
+      # FEISHU_SIGNING_SECRET_FILE: /run/secrets/feishu_signing_secret
+    secrets:
+      - codeup_secret_token
+      - gitlab_secret_token
+      - feishu_webhook_url
+      # - feishu_signing_secret
+
+secrets:
+  codeup_secret_token:
+    file: ./secrets/codeup_secret_token.txt
+  gitlab_secret_token:
+    file: ./secrets/gitlab_secret_token.txt
+  feishu_webhook_url:
+    file: ./secrets/feishu_webhook_url.txt
+  # feishu_signing_secret:
+  #   file: ./secrets/feishu_signing_secret.txt

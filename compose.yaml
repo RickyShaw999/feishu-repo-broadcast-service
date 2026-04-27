@@ -1,0 +1,45 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: ${SERVICE_NAME:-feishu-repo-broadcast-service}
+      DATABASE_PATH: /data/service.db
+      DELIVERY_MODE: ${DELIVERY_MODE:-dry_run}
+      WORKER_ENABLED: ${WORKER_ENABLED:-true}
+      WORKER_INTERVAL_SECONDS: ${WORKER_INTERVAL_SECONDS:-2}
+      LEASE_TIMEOUT_SECONDS: ${LEASE_TIMEOUT_SECONDS:-300}
+      MAX_DELIVERY_ATTEMPTS: ${MAX_DELIVERY_ATTEMPTS:-5}
+      CODEUP_SECRET_TOKEN: ${CODEUP_SECRET_TOKEN:-}
+      GITLAB_SECRET_TOKEN: ${GITLAB_SECRET_TOKEN:-}
+      FEISHU_WEBHOOK_URL_FILE: ${FEISHU_WEBHOOK_URL_FILE:-}
+      FEISHU_SIGNING_SECRET_FILE: ${FEISHU_SIGNING_SECRET_FILE:-}
+    volumes:
+      - repo_broadcast_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST to a real domain, or :8088 only for local dry-run}
+    volumes:
+      - ./deploy/Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  repo_broadcast_data:
+  caddy_data:
+  caddy_config:
