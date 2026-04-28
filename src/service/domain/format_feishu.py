@@ -17,13 +17,20 @@ def _event_time(event: PushEvent) -> str:
     return "unknown"
 
 
+def _display_actor(event: PushEvent) -> str:
+    commit_authors = {commit.author_name for commit in event.commits if commit.author_name}
+    if len(commit_authors) == 1:
+        return next(iter(commit_authors))
+    return event.actor_name
+
+
 def render_message_text(event: PushEvent) -> str:
     repo_label = event.repository.path_with_namespace or event.repository.name
     branch_label = event.branch or event.ref or "unknown"
     commit_count = event.total_commits_count
     lines = [
         "代码推送通知",
-        f"操作人：{event.actor_name}",
+        f"操作人：{_display_actor(event)}",
         f"仓库：{repo_label}",
         f"分支：{branch_label}",
         f"推送时间：{_event_time(event)}",
@@ -36,10 +43,13 @@ def render_message_text(event: PushEvent) -> str:
         for commit in event.commits[:MAX_COMMITS_IN_MESSAGE]:
             author = commit.author_name or "unknown"
             message = " ".join(commit.message.split()) or "(no message)"
-            lines.append(f"- {_short_sha(commit.id)} {author}: {message}")
+            lines.append(f"- ({_short_sha(commit.id)}) {author}: {message}")
+            lines.append("")
         remaining = len(event.commits) - MAX_COMMITS_IN_MESSAGE
         if remaining > 0:
             lines.append(f"- 其余 {remaining} 个提交已省略")
+        elif lines[-1] == "":
+            lines.pop()
 
     if event.repository.web_url:
         lines.append(f"仓库链接：{event.repository.web_url}")
