@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from service.domain.models import PushEvent
 
 
@@ -13,14 +15,33 @@ def _short_sha(value: str) -> str:
 def _event_time(event: PushEvent) -> str:
     timestamps = [commit.timestamp for commit in event.commits if commit.timestamp]
     if timestamps:
-        return max(timestamps)
+        return _format_timestamp(max(timestamps))
     return "unknown"
 
 
+def _format_timestamp(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+
+def _latest_commit_author(event: PushEvent) -> str | None:
+    for commit in reversed(event.commits):
+        if commit.author_name:
+            return commit.author_name
+    return None
+
+
 def _display_actor(event: PushEvent) -> str:
-    commit_authors = {commit.author_name for commit in event.commits if commit.author_name}
-    if len(commit_authors) == 1:
-        return next(iter(commit_authors))
+    latest_commit_author = _latest_commit_author(event)
+    if latest_commit_author:
+        return latest_commit_author
+    if event.actor_username:
+        return event.actor_username
     return event.actor_name
 
 
@@ -43,7 +64,8 @@ def render_message_text(event: PushEvent) -> str:
         for commit in event.commits[:MAX_COMMITS_IN_MESSAGE]:
             author = commit.author_name or "unknown"
             message = " ".join(commit.message.split()) or "(no message)"
-            lines.append(f"- ({_short_sha(commit.id)}) {author}: {message}")
+            commit_time = _format_timestamp(commit.timestamp)
+            lines.append(f"- ({_short_sha(commit.id)}) {author} [{commit_time}]: {message}")
             lines.append("")
         remaining = len(event.commits) - MAX_COMMITS_IN_MESSAGE
         if remaining > 0:
