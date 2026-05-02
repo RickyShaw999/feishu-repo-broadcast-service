@@ -25,6 +25,7 @@ class Settings:
     log_level: str = "INFO"
     codeup_secret_token: str | None = None
     gitlab_secret_token: str | None = None
+    gitlab_signing_token: str | None = None
     feishu_webhook_url: str | None = None
     feishu_signing_secret: str | None = None
 
@@ -41,6 +42,7 @@ class Settings:
             log_level=os.getenv("LOG_LEVEL", cls.log_level),
             codeup_secret_token=read_secret("CODEUP_SECRET_TOKEN"),
             gitlab_secret_token=read_secret("GITLAB_SECRET_TOKEN"),
+            gitlab_signing_token=read_secret("GITLAB_SIGNING_TOKEN"),
             feishu_webhook_url=read_secret("FEISHU_WEBHOOK_URL"),
             feishu_signing_secret=read_secret("FEISHU_SIGNING_SECRET"),
         )
@@ -48,4 +50,3 @@ class Settings:
     @property
     def dry_run(self) -> bool:
         return self.delivery_mode != "live"
-

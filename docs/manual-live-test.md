@@ -7,7 +7,7 @@
 - 飞书机器人已添加到目标群聊。
 - `secrets/feishu_webhook_url.txt` 包含完整的自定义机器人 Webhook URL。
 - 如果启用了机器人签名，`secrets/feishu_signing_secret.txt` 包含签名密钥。
-- 提供方密钥文件包含与 Codeup 或 GitLab 中配置一致的 token。
+- 提供方密钥文件包含与 Codeup 或 GitLab 中配置一致的 token；GitLab 使用 signing token 时，还需要 `secrets/gitlab_signing_token.txt`。
 
 ## 步骤
 

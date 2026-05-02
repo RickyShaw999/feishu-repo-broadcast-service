@@ -16,6 +16,12 @@ secrets/gitlab_secret_token.txt
 secrets/feishu_webhook_url.txt
 ```
 
+如果 GitLab Webhook 使用 signing token，再创建这个文件：
+
+```text
+secrets/gitlab_signing_token.txt
+```
+
 如果飞书机器人启用了签名，再创建这个文件：
 
 ```text
@@ -37,6 +43,13 @@ secrets/feishu_signing_secret.txt
 - 这个值必须和 GitLab 仓库后台配置的一模一样。
 - 这个值可以由你自己生成；它不是 GitLab 自动生成后放进本仓库的文件。
 - 如果当前实例不用 GitLab，可以先填一个随机长字符串占位。
+
+`secrets/gitlab_signing_token.txt`：
+
+- 填 GitLab Webhook 配置里生成的 signing token。
+- 这个值通常以 `whsec_` 开头。
+- 新版 GitLab 推荐 signing token；如果请求带 `webhook-signature`，服务会优先校验它。
+- 迁移期可以同时保留 `gitlab_secret_token.txt`，没有签名头的旧请求仍会回退到 `X-Gitlab-Token`。
 
 `secrets/feishu_webhook_url.txt`：
 
@@ -68,6 +81,12 @@ printf '%s' '<codeup-token>' > secrets/codeup_secret_token.txt
 printf '%s' '<gitlab-token>' > secrets/gitlab_secret_token.txt
 ```
 
+如果 GitLab 使用 signing token，再创建：
+
+```bash
+printf '%s' '<gitlab-signing-token>' > secrets/gitlab_signing_token.txt
+```
+
 创建飞书 Webhook URL 文件：
 
 ```bash
@@ -89,6 +108,21 @@ cp compose.override.example.yaml compose.override.yaml
 ```
 
 如果没有启用飞书签名，不需要改 `compose.override.yaml`。
+
+如果启用了 GitLab signing token，需要打开 `compose.override.yaml`，取消三处注释：
+
+```yaml
+GITLAB_SIGNING_TOKEN_FILE: /run/secrets/gitlab_signing_token
+```
+
+```yaml
+- gitlab_signing_token
+```
+
+```yaml
+gitlab_signing_token:
+  file: ./secrets/gitlab_signing_token.txt
+```
 
 如果启用了飞书签名，需要打开 `compose.override.yaml`，取消三处注释：
 

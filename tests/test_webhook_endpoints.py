@@ -1,3 +1,9 @@
+import base64
+import hashlib
+import hmac
+import json
+import time
+
 from fastapi.testclient import TestClient
 
 from service.config import Settings
@@ -7,17 +13,28 @@ from service.main import create_app
 from tests.conftest import load_fixture
 
 
-def make_client(tmp_path):
+GITLAB_SIGNING_TOKEN = "whsec_" + base64.b64encode(b"gitlab-signing-key").decode("utf-8")
+
+
+def make_client(tmp_path, *, gitlab_secret_token="gitlab-secret", gitlab_signing_token=None):
     settings = Settings(
         database_path=str(tmp_path / "service.db"),
         worker_enabled=False,
         codeup_secret_token="codeup-secret",
-        gitlab_secret_token="gitlab-secret",
+        gitlab_secret_token=gitlab_secret_token,
+        gitlab_signing_token=gitlab_signing_token,
     )
     store = SQLiteStore(settings.database_path)
     store.initialize()
     app = create_app(settings=settings, store=store)
     return TestClient(app)
+
+
+def gitlab_signature(*, token: str, message_id: str, timestamp: str, body: bytes) -> str:
+    key = base64.b64decode(token.removeprefix("whsec_"), validate=True)
+    signed_content = message_id.encode("utf-8") + b"." + timestamp.encode("utf-8") + b"." + body
+    digest = hmac.new(key, signed_content, hashlib.sha256).digest()
+    return "v1," + base64.b64encode(digest).decode("utf-8")
 
 
 def test_codeup_webhook_rejects_missing_token(tmp_path, caplog) -> None:
@@ -91,6 +108,67 @@ def test_gitlab_webhook_rejects_wrong_event(tmp_path, caplog) -> None:
 
 def test_gitlab_webhook_accepts_valid_push(tmp_path) -> None:
     client = make_client(tmp_path)
+
+    response = client.post(
+        "/webhooks/gitlab",
+        headers={"X-Gitlab-Event": "Push Hook", "X-Gitlab-Token": "gitlab-secret"},
+        json=load_fixture("gitlab_push.json"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+
+
+def test_gitlab_webhook_accepts_standard_webhook_signature(tmp_path) -> None:
+    client = make_client(tmp_path, gitlab_secret_token=None, gitlab_signing_token=GITLAB_SIGNING_TOKEN)
+    body = json.dumps(load_fixture("gitlab_push.json")).encode("utf-8")
+    message_id = "evt-gitlab-1"
+    timestamp = str(int(time.time()))
+
+    response = client.post(
+        "/webhooks/gitlab",
+        headers={
+            "Content-Type": "application/json",
+            "X-Gitlab-Event": "Push Hook",
+            "webhook-id": message_id,
+            "webhook-timestamp": timestamp,
+            "webhook-signature": gitlab_signature(
+                token=GITLAB_SIGNING_TOKEN,
+                message_id=message_id,
+                timestamp=timestamp,
+                body=body,
+            ),
+        },
+        content=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+
+
+def test_gitlab_webhook_rejects_invalid_signature_even_with_secret_token(tmp_path, caplog) -> None:
+    client = make_client(tmp_path, gitlab_signing_token=GITLAB_SIGNING_TOKEN)
+    body = json.dumps(load_fixture("gitlab_push.json")).encode("utf-8")
+
+    response = client.post(
+        "/webhooks/gitlab",
+        headers={
+            "Content-Type": "application/json",
+            "X-Gitlab-Event": "Push Hook",
+            "X-Gitlab-Token": "gitlab-secret",
+            "webhook-id": "evt-gitlab-2",
+            "webhook-timestamp": str(int(time.time())),
+            "webhook-signature": "v1,invalid",
+        },
+        content=body,
+    )
+
+    assert response.status_code == 401
+    assert "webhook.rejected provider=gitlab reason=invalid_signature" in caplog.text
+
+
+def test_gitlab_webhook_falls_back_to_secret_token_when_no_signature_header(tmp_path) -> None:
+    client = make_client(tmp_path, gitlab_signing_token=GITLAB_SIGNING_TOKEN)
 
     response = client.post(
         "/webhooks/gitlab",

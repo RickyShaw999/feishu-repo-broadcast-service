@@ -122,7 +122,7 @@ agent 只有在下面这些都满足时，才应宣称部署完成：
 ## 功能概览
 
 - 支持 Codeup `push` Webhook
-- 支持 GitLab `push` Webhook
+- 支持 GitLab `push` Webhook，并兼容 `X-Gitlab-Token` 和新版 `webhook-signature` 签名校验
 - SQLite 持久化去重、outbox、重试、重启恢复
 - Docker Compose 部署
 - 生产环境使用 Docker Compose secrets 读取 token / 飞书 webhook
@@ -269,6 +269,14 @@ print(secrets.token_urlsafe(32), end="")
 PY
 ```
 
+如果 GitLab Webhook 配置页面支持 signing token，推荐在 GitLab 后台生成 signing token，并写入：
+
+```bash
+printf '%s' '<gitlab-signing-token>' > secrets/gitlab_signing_token.txt
+```
+
+这个 token 通常以 `whsec_` 开头。迁移期可以同时保留 `secrets/gitlab_secret_token.txt`。
+
 写入飞书机器人 webhook：
 
 ```bash
@@ -291,6 +299,15 @@ cp compose.override.example.yaml compose.override.yaml
 
 1. 第一轮验证先把 `DELIVERY_MODE: live` 改成 `dry_run`
 2. 验证通过后再切回 `live`
+
+如果启用了 GitLab signing token，取消 `compose.override.yaml` 里这三处注释：
+
+```yaml
+# GITLAB_SIGNING_TOKEN_FILE: /run/secrets/gitlab_signing_token
+# - gitlab_signing_token
+# gitlab_signing_token:
+#   file: ./secrets/gitlab_signing_token.txt
+```
 
 如果没有启用飞书签名，保持这三处注释：
 
@@ -415,8 +432,18 @@ curl -fsS http://<你的域名>/health
 | GitLab 表单项 | 填写方式 |
 | --- | --- |
 | URL | `http://<你的域名>/webhooks/gitlab` 或 `https://<你的域名>/webhooks/gitlab` |
-| Secret Token | `secrets/gitlab_secret_token.txt` 中的内容 |
+| Signing token | 推荐使用。把 GitLab 生成的 `whsec_...` 写入 `secrets/gitlab_signing_token.txt` |
+| Secret Token | 旧版兼容。把 `secrets/gitlab_secret_token.txt` 中的内容填进去 |
 | Trigger | 只勾选 `Push events` |
+
+GitLab 兼容边界：
+
+- 当前服务只处理 `X-Gitlab-Event: Push Hook`。
+- 如果请求带 `webhook-signature`，服务会按 GitLab signing token 校验 HMAC-SHA256 签名和 5 分钟时间窗口。
+- 如果请求没有 `webhook-signature`，服务会回退校验 `X-Gitlab-Token`。
+- GitLab push payload 最多只带最新 20 条 commit，但 `total_commits_count` 是真实总数；服务会用真实总数计算“其余 N 个提交已省略”。
+- GitLab 后台测试 `Push events` 要求项目至少有一个 commit。测试成功会返回 `2xx`，也能重新启用被 GitLab 暂停的 webhook。
+- 当前不处理 `Tag Push Hook`、Merge Request、Pipeline、Issue、Comment 等事件；这些仍属于 README 中声明的不支持范围。
 
 ## 飞书机器人怎么创建
 
@@ -581,6 +608,7 @@ docker compose up -d
 | `MAX_DELIVERY_ATTEMPTS` | `5` | 最大重试次数 |
 | `CODEUP_SECRET_TOKEN` / `_FILE` | 空 | Codeup token |
 | `GITLAB_SECRET_TOKEN` / `_FILE` | 空 | GitLab token |
+| `GITLAB_SIGNING_TOKEN` / `_FILE` | 空 | GitLab signing token，通常以 `whsec_` 开头 |
 | `FEISHU_WEBHOOK_URL` / `_FILE` | 空 | 飞书机器人 webhook |
 | `FEISHU_SIGNING_SECRET` / `_FILE` | 空 | 飞书机器人签名 secret |
 | `PUBLIC_HOST` | `example.com` | caddy 站点地址；本地可用 `:80` |
