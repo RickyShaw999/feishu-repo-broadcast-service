@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from service.config import Settings
 from service.domain.format_feishu import build_feishu_payload
@@ -32,7 +33,9 @@ def test_dry_run_worker_marks_delivery_without_external_call(tmp_path) -> None:
     assert store.list_outbox()[0]["status"] == DELIVERED
     attempt = store.list_attempts()[0]
     assert attempt["success"] == 1
-    assert "Technical Explanation Protocol" in attempt["response_body"]
+    payload = json.loads(attempt["response_body"])
+    assert payload["msg_type"] == "interactive"
+    assert payload["card"]["header"]["title"]["content"] == "代码推送通知：pengleni"
 
 
 def test_feishu_sign_is_stable_for_known_timestamp() -> None:
